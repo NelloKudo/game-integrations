@@ -1,0 +1,28 @@
+{
+    "format": 1,
+    "maintainers": [
+        {
+            "en": "NelloKudo <marshnelloosu@gmail.com>"
+        }
+    ],
+    "game": {
+        "title": "Arknights: Endfield [local]",
+        "description": {
+            "en": "The factory must grow."
+        },
+        "developer": "Hypergryph",
+        "publisher": "GRYPHLINE",
+        "images": {
+            "icon": "http://127.0.0.1:8080/games/endfield/icon.png",
+            "poster": "http://127.0.0.1:8080/games/endfield/poster.jpg",
+            "background": "http://127.0.0.1:8080/games/endfield/background.jpg",
+            "slides": [
+                "http://127.0.0.1:8080/games/endfield/background.jpg"
+            ]
+        }
+    },
+    "package": {
+        "url": "http://127.0.0.1:8080/games/endfield/package.json",
+        "output": "integration"
+    }
+}
