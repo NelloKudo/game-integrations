@@ -1,4 +1,4 @@
--- Endfield integration v0.1.0
+-- Endfield integration v0.2.0
 -- Copyright (C) 2026 NelloKudo <marshnelloosu@gmail.com>
 --
 -- This program is free software: you can redistribute it and/or modify
@@ -36,9 +36,9 @@ type Pack = {
 local BASE_URL = "https://launcher.gryphline.com"
 local APP_CODE = "YDUTE5gscDZ229CW"
 local UMU_VERSION = "1.3.0"
-local PROTON_VERSION = "dwproton-10.0-16"
-local PROTON_ARCHIVE_NAME = "dwproton-10.0-16-x86_64"
-local PROTON_URL = "https://dawn.wine/dawn-winery/dwproton/releases/download/dwproton-10.0-16/dwproton-10.0-16-x86_64.tar.xz"
+local PROTON_VERSION = "dwproton-10.0-21"
+local PROTON_ARCHIVE_NAME = "dwproton-10.0-21-x86_64"
+local PROTON_URL = "https://dawn.wine/dawn-winery/dwproton/releases/download/dwproton-10.0-21/dwproton-10.0-21-x86_64.tar.xz"
 
 ------------------------------------------------- Paths -------------------------------------------------
 
@@ -52,11 +52,12 @@ local umu_binary_path: string   = path.join(umu_dir_path, "umu-run")
 local proton_dir_path: string   = path.join(data_dir_path, "proton")
 local proton_binary_path: string = path.join(proton_dir_path, PROTON_ARCHIVE_NAME, "files", "bin", "wine64")
 local prefix_dir_path: string   = path.join(data_dir_path, "prefix")
+local repair_flag_path: string  = path.join(data_dir_path, ".repair_requested")
 
 ------------------------------------------------- API Functions -------------------------------------------------
 
 local function batch_proxy_post(body: {[string]: any}): ({[string]: any}?, string?)
-    local url = BASE_URL .. "/api/proxy/batch_proxy"
+    local url = `{BASE_URL}/api/proxy/batch_proxy`
     local json_str = str.encode("json", body)
     
     local response = http.fetch(url, {
@@ -201,21 +202,39 @@ local function process_delete_files()
     end
     
     local content = str.from_bytes(fs.read_file(delete_file_path):await())
-    
+
+    -- Collect all remove promises first, then await them all (async batch deletion)
+    local remove_promises = {}
+
     for line in string.gmatch(content, "[^\r\n]+") do
-        line = string.match(line, "^%s*(.-)%s*$") -- trim whitespace
+        line = string.match(line, "^%s*(.-)%s*$")
         
         if line and line ~= "" then
             local file_to_delete = path.join(game_dir_path, line)
             
             if fs.exists(file_to_delete) then
-                fs.remove(file_to_delete):await()
+                table.insert(remove_promises, fs.remove(file_to_delete))
             end
         end
     end
+
+    for _, promise in ipairs(remove_promises) do
+        local ok, err = pcall(function()
+            promise:await()
+        end)
+        if not ok then
+            -- Non-fatal: log and continue
+            print("Warning: failed to delete file: " .. tostring(err))
+        end
+    end
     
-    -- Remove the delete_files.txt itself
-    fs.remove(delete_file_path):await()
+    -- Remove delete_files.txt itself
+    local ok, err = pcall(function()
+        fs.remove(delete_file_path):await()
+    end)
+    if not ok then
+        print("Warning: failed to delete delete_files.txt: " .. tostring(err))
+    end
 end
 
 ------------------------------------------------- Version Management -------------------------------------------------
@@ -254,6 +273,259 @@ end
 
 local function get_gameid(settings): string
     return settings.get_property("runner.gameid") or "umu-endfield"
+end
+
+------------------------------------------------- Progress Formatting -------------------------------------------------
+
+local function format_progress(current: number, total: number): string
+    local current_mb = current / 1024 / 1024
+    local total_mb = total / 1024 / 1024
+    return string.format("%.2f MB / %.2f MB", current_mb, total_mb)
+end
+
+------------------------------------------------- Repair -------------------------------------------------
+
+--- Extract the CDN version-tag segment from a pack URL.
+--- URL structure after "beyond.hg-cdn.com": /{appcode}/{ver}/update/{ch}/{sub}/{platform}/{version_tag}/...
+--- Counting non-empty path segments (1-indexed), the version_tag is segment 7.
+local function extract_version_tag(url: string): string?
+    local cdn_path = string.match(url, "beyond%.hg%-cdn%.com(/.*)")
+    if not cdn_path then return nil end
+
+    local i = 0
+    for part in string.gmatch(cdn_path, "[^/]+") do
+        i = i + 1
+        if i == 7 then
+            return part
+        end
+    end
+
+    return nil
+end
+
+--- Fetch the latest version, short_version, and CDN version_tag from the API.
+--- Sends an empty current_version so we always get the full pkg response,
+--- which is the only source of the version_tag we need for CDN repair URLs.
+local function get_repair_info(): ({version: string, version_tag: string, short_version: string}?, string?)
+    local body = {
+        proxy_reqs = {
+            {
+                kind = "get_latest_game",
+                get_latest_game_req = {
+                    appcode = APP_CODE,
+                    channel = "6",
+                    sub_channel = "6",
+                    version = ""
+                }
+            }
+        }
+    }
+
+    local response, err = batch_proxy_post(body)
+    if err then return nil, err end
+    if not response or not response.proxy_rsps then
+        return nil, "Invalid API response"
+    end
+
+    for _, proxy_rsp in ipairs(response.proxy_rsps) do
+        if proxy_rsp.get_latest_game_rsp then
+            local game_rsp = proxy_rsp.get_latest_game_rsp
+            local version = game_rsp.version
+            if not version then
+                return nil, "No version in API response"
+            end
+
+            -- Derive short_version: "1.0.14" → "1.0"
+            local parts = {}
+            for part in string.gmatch(version, "[^.]+") do
+                table.insert(parts, part)
+            end
+            local short_version = (parts[1] or "0") .. "." .. (parts[2] or "0")
+
+            -- Extract version_tag from pkg pack URLs (preferred), then pkg.url,
+            -- then patch URLs as a fallback — mirrors the Rust repair implementation.
+            local version_tag = nil
+
+            if game_rsp.pkg then
+                if game_rsp.pkg.packs then
+                    for _, pack in ipairs(game_rsp.pkg.packs) do
+                        version_tag = extract_version_tag(pack.url)
+                        if version_tag then break end
+                    end
+                end
+                if not version_tag and game_rsp.pkg.url then
+                    version_tag = extract_version_tag(game_rsp.pkg.url)
+                end
+            end
+
+            if not version_tag and game_rsp.patch then
+                if game_rsp.patch.patches then
+                    for _, patch in ipairs(game_rsp.patch.patches) do
+                        version_tag = extract_version_tag(patch.url)
+                        if version_tag then break end
+                    end
+                end
+                if not version_tag and game_rsp.patch.url then
+                    version_tag = extract_version_tag(game_rsp.patch.url)
+                end
+            end
+
+            if not version_tag then
+                return nil, "Could not extract version_tag from API response"
+            end
+
+            return {
+                version = version,
+                version_tag = version_tag,
+                short_version = short_version
+            }, nil
+        end
+    end
+
+    return nil, "No game info in API response"
+end
+
+--- Build a repair actions pipeline. Shared state is captured in upvalues so
+--- each step can hand data forward to the next without global variables.
+--- Returned directly from get_actions_pipeline when the repair flag is set.
+local function build_repair_pipeline()
+    -- Upvalues shared across pipeline steps
+    local repair_info     = nil  -- set in step 1
+    local manifest_entries = {}  -- set in step 2
+    local broken_files    = {}   -- set in step 3
+
+    return {
+        title = "Repair Endfield",
+        pipeline = {
+            -- ── Step 1: fetch CDN version info ────────────────────────────
+            {
+                title = "Fetch version info",
+                perform = function(updater)
+                    updater({
+                        current = 0, total = 0,
+                        format = function() return "Fetching version info..." end
+                    })
+
+                    local info, err = get_repair_info()
+                    if err or not info then
+                        error("Failed to get repair info: " .. (err or "unknown"))
+                    end
+
+                    repair_info = info
+                end
+            },
+
+            -- ── Step 2: download and parse the manifest TSV ───────────────
+            {
+                title = "Download manifest",
+                perform = function(updater)
+                    updater({
+                        current = 0, total = 0,
+                        format = function() return `Fetching manifest for {repair_info.version}...` end
+                    })
+
+                    local url = `https://github.com/dawn-winery/p30k-manifest/releases/download/{repair_info.version}/manifest.tsv`
+                    local resp = http.fetch(url, { method = "get" }):await()
+
+                    if not resp.is_ok then
+                        error(`Manifest download failed: HTTP {resp.status}`)
+                    end
+
+                    manifest_entries = {}
+                    for line in string.gmatch(str.from_bytes(resp.body), "[^\r\n]+") do
+                        line = string.match(line, "^%s*(.-)%s*$")
+                        if line and line ~= "" then
+                            local md5, filename = string.match(line, "^([^\t]+)\t(.+)$")
+                            if md5 and filename then
+                                table.insert(manifest_entries, { md5 = md5, filename = filename })
+                            end
+                        end
+                    end
+
+                    updater({
+                        current = 1, total = 1,
+                        format = function() return `Loaded {#manifest_entries} manifest entries` end
+                    })
+                end
+            },
+
+            -- ── Step 3: MD5-verify every file ─────────────────────────────
+            {
+                title = "Verify game files",
+                perform = function(updater)
+                    local total = #manifest_entries
+                    broken_files = {}
+
+                    -- Throttle UI updates: sending a progress message per file
+                    -- floods the GTK message queue and freezes the launcher.
+                    -- Update every 50 files so the UI stays responsive.
+                    local UPDATE_INTERVAL = 50
+
+                    for i, entry in ipairs(manifest_entries) do
+                        if i == 1 or i % UPDATE_INTERVAL == 0 or i == total then
+                            updater({
+                                current = i, total = total,
+                                format = function()
+                                    return `Verifying ({i}/{total}) {path.file_name(entry.filename) or entry.filename}`
+                                end
+                            })
+                        end
+
+                        local file_path = path.join(game_dir_path, entry.filename)
+
+                        if not fs.exists(file_path) then
+                            table.insert(broken_files, entry.filename)
+                        else
+                            local hash_bytes = hash.digitize_file("md5", file_path):await()
+                            local actual_md5 = str.encode("hex", hash_bytes)
+                            if string.lower(actual_md5) ~= string.lower(entry.md5) then
+                                table.insert(broken_files, entry.filename)
+                            end
+                        end
+                    end
+                end
+            },
+
+            -- ── Step 4: re-download broken files ──────────────────────────
+            {
+                title = "Repair game files",
+                before = function()
+                    return #broken_files > 0
+                end,
+                perform = function(updater)
+                    local total = #broken_files
+                    local dl_handle = downloader.create()
+
+                    for i, filename in ipairs(broken_files) do
+                        local file_url = `https://beyond.hg-cdn.com/{APP_CODE}/{repair_info.short_version}/update/6/6/Windows/{repair_info.version_tag}/files/{filename}`
+                        local dest = path.join(game_dir_path, filename)
+
+                        local parent = path.parent(dest)
+                        if parent and not fs.exists(parent) then
+                            fs.create_dir(parent):await()
+                        end
+
+                        local task = downloader.download(dl_handle, {
+                            url = file_url,
+                            output_file = dest,
+                            continue_download = false,
+                            on_update = function(current: number, file_total: number)
+                                updater({
+                                    current = current, total = file_total,
+                                    format = function()
+                                        return `Repairing ({i}/{total}) {path.file_name(filename) or filename}: {format_progress(current, file_total)}`
+                                    end
+                                })
+                            end
+                        })
+                        downloader.wait(task)
+                    end
+
+                    downloader.close(dl_handle)
+                end
+            }
+        }
+    }
 end
 
 ------------------------------------------------- Imports -------------------------------------------------
@@ -379,13 +651,13 @@ return function()
             end,
 
             get_actions_pipeline = function(variant: Variant)
-                -- Helper function for progress formatting
-                local function format_progress(current: number, total: number): string
-                    local current_mb = current / 1024 / 1024
-                    local total_mb = total / 1024 / 1024
-                    return string.format("%.2f MB / %.2f MB", current_mb, total_mb)
+                -- A repair was queued via the Repair Game tool button.
+                -- Consume the flag immediately so a second call returns nil.
+                if fs.exists(repair_flag_path) then
+                    fs.remove(repair_flag_path):await()
+                    return build_repair_pipeline()
                 end
-                
+
                 -- Check for umu installation
                 if not is_umu_installed() then
                     local umu_archive_path = path.join(path.temp_dir(), `umu-launcher-{UMU_VERSION}.tar`)
@@ -402,13 +674,7 @@ return function()
                                         output_file = umu_archive_path,
                                         continue_download = true,
                                         on_update = function(current: number, total: number)
-                                            updater({
-                                                current = current,
-                                                total = total,
-                                                format = function()
-                                                    return format_progress(current, total)
-                                                end
-                                            })
+                                            updater({ current = current, total = total })
                                         end
                                     })
                                     downloader.wait(task_handle)
@@ -421,18 +687,12 @@ return function()
                                     if fs.exists(umu_dir_path) then
                                         fs.remove_dir(umu_dir_path):await()
                                     end
-                                    
+
                                     fs.create_dir(data_dir_path):await()
                                     local handle: number = archive.open(umu_archive_path)
 
                                     archive.extract(handle, data_dir_path, function(current: number, total: number)
-                                        updater({
-                                            current = current,
-                                            total = total,
-                                            format = function()
-                                                return format_progress(current, total)
-                                            end
-                                        })
+                                        updater({ current = current, total = total })
                                     end)
 
                                     archive.close(handle)
@@ -459,13 +719,7 @@ return function()
                                         output_file = proton_archive_path,
                                         continue_download = true,
                                         on_update = function(current: number, total: number)
-                                            updater({
-                                                current = current,
-                                                total = total,
-                                                format = function()
-                                                    return format_progress(current, total)
-                                                end
-                                            })
+                                            updater({ current = current, total = total })
                                         end
                                     })
                                     downloader.wait(task_handle)
@@ -478,18 +732,12 @@ return function()
                                     if fs.exists(proton_dir_path) then
                                         fs.remove_dir(proton_dir_path):await()
                                     end
-                                    
+
                                     fs.create_dir(proton_dir_path):await()
                                     local handle: number = archive.open(proton_archive_path)
 
                                     archive.extract(handle, proton_dir_path, function(current: number, total: number)
-                                        updater({
-                                            current = current,
-                                            total = total,
-                                            format = function()
-                                                return format_progress(current, total)
-                                            end
-                                        })
+                                        updater({ current = current, total = total })
                                     end)
 
                                     archive.close(handle)
@@ -555,16 +803,16 @@ return function()
                         local downloader_handle = downloader.create()
                         local total_downloaded = 0
                         local total_size = 0
-                        
+
                         -- Calculate total size
                         for _, pack in ipairs(packs) do
                             total_size = total_size + tonumber(pack.package_size)
                         end
-                        
+
                         -- Download all parts
                         for idx, pack in ipairs(packs) do
                             local pack_path = path.join(path.temp_dir(), `endfield_pack_{idx}.zip`)
-                            
+
                             local task_handle = downloader.download(downloader_handle, {
                                 url = pack.url,
                                 output_file = pack_path,
@@ -572,18 +820,15 @@ return function()
                                 on_update = function(current: number, total: number)
                                     updater({
                                         current = total_downloaded + current,
-                                        total = total_size,
-                                        format = function()
-                                            return format_progress(total_downloaded + current, total_size)
-                                        end
+                                        total = total_size
                                     })
                                 end
                             })
                             downloader.wait(task_handle)
-                            
+
                             total_downloaded = total_downloaded + tonumber(pack.package_size)
                         end
-                        
+
                         downloader.close(downloader_handle)
                     end
                 })
@@ -597,46 +842,29 @@ return function()
                         for _, pack in ipairs(packs) do
                             total_size = total_size + tonumber(pack.package_size)
                         end
-                        
+
                         local bytes_extracted = 0
-                        
+
                         -- Extract each part sequentially
                         for idx, pack in ipairs(packs) do
                             local pack_path = path.join(path.temp_dir(), `endfield_pack_{idx}.zip`)
                             local pack_size = tonumber(pack.package_size)
-                            
+
                             local part_start = bytes_extracted
-                            local last_update = 0
-                            
+
                             archive.extract(
                                 archive.open(pack_path),
                                 game_dir_path,
                                 function(current: number, total: number, diff: number)
-                                    local overall_current = part_start + current
-                                    
                                     updater({
-                                        current = overall_current,
-                                        total = total_size,
-                                        format = function()
-                                            return `Part {idx}/{#packs}: {format_progress(overall_current, total_size)}`
-                                        end
+                                        current = part_start + current,
+                                        total = total_size
                                     })
-                                    
-                                    last_update = current
                                 end
                             )
-                            
+
                             bytes_extracted = bytes_extracted + pack_size
-                            
-                            -- Update to show part completed
-                            updater({
-                                current = bytes_extracted,
-                                total = total_size,
-                                format = function()
-                                    return `Part {idx}/{#packs}: {format_progress(bytes_extracted, total_size)}`
-                                end
-                            })
-                            
+
                             -- Remove the part after extraction
                             fs.remove(pack_path):await()
                         end
@@ -684,6 +912,109 @@ return function()
             get_layout = function(variant: Variant)
                 local settings = import_settings()
                 return settings.get_layout(variant)
+            end
+        },
+
+        tools = {
+            --- Return the list of tool buttons shown in the launcher UI.
+            --- Buttons are only available once the game, UMU, and Proton are
+            --- all fully installed.
+            get_buttons = function(variant: Variant)
+                if not is_game_installed() or not is_umu_installed() or not is_proton_installed() then
+                    return {}
+                end
+
+                local settings = import_settings()
+                local proton_path = path.join(proton_dir_path, PROTON_ARCHIVE_NAME)
+                local prefix_path = get_prefix_path(settings)
+
+                local wine_env = {
+                    PROTONPATH = proton_path,
+                    WINEPREFIX = path.join(prefix_path, "pfx"),
+                    GAMEID = get_gameid(settings),
+                    PROTONFIXES_DISABLE = "1",
+                    WINEDEBUG = ""
+                }
+
+                return {
+                    -- ── Wine Configuration ────────────────────────────────
+                    {
+                        title = "Wine Configuration",
+                        description = "Open winecfg to adjust Wine settings for Endfield",
+                        callback = function()
+                            process.open(umu_binary_path, { "winecfg" }, wine_env)
+                        end
+                    },
+
+                    -- ── Wine Console ──────────────────────────────────────
+                    {
+                        title = "Wine Console",
+                        description = "Open an interactive Wine console inside the prefix",
+                        callback = function()
+                            process.open(umu_binary_path, { "wineconsole" }, wine_env)
+                        end
+                    },
+
+                    -- ── Remake Wine Prefix ────────────────────────────────
+                    {
+                        title = "Remake Wine Prefix",
+                        description = "Delete and reinitialise the Wine prefix (resets all Wine settings)",
+                        callback = function()
+                            portal.dialog({
+                                title = "Remake Wine Prefix",
+                                message = "This will permanently delete and recreate your Wine prefix.\n\nAll Wine registry entries, DLL overrides, and per-game settings will be lost.\n\nContinue?",
+                                can_close = true,
+                                buttons = {
+                                    {
+                                        label = "Remake Prefix",
+                                        status = "dangerous",
+                                        callback = function()
+                                            if fs.exists(prefix_path) then
+                                                fs.remove(prefix_path):await()
+                                            end
+                                            fs.create_dir(prefix_path):await()
+
+                                            -- Initialise the fresh prefix
+                                            local handle = process.open(
+                                                umu_binary_path,
+                                                { "wineboot", "--init" },
+                                                wine_env
+                                            )
+                                            process.wait(handle)
+
+                                            portal.toast({ message = "Wine prefix recreated successfully" })
+                                        end
+                                    }
+                                }
+                            })
+                        end
+                    },
+
+                    -- ── Repair Game ───────────────────────────────────────
+                    {
+                        title = "Repair Game",
+                        description = "Verify all game files against the upstream manifest and redownload any that are missing or corrupted",
+                        callback = function()
+                            -- Write a flag file so get_actions_pipeline returns the
+                            -- repair pipeline on the next UpdateGameInfo cycle.
+                            -- The launcher calls UpdateGameInfo right after every
+                            -- button press, so the pipeline appears immediately.
+                            fs.write_file(repair_flag_path, str.to_bytes("")):await()
+
+                            portal.toast({
+                                message = "Repair queued — click the action button to start",
+                                action = {
+                                    label = "Cancel",
+                                    callback = function()
+                                        if fs.exists(repair_flag_path) then
+                                            fs.remove(repair_flag_path):await()
+                                        end
+                                    end
+                                }
+                            })
+                        end
+                    }
+                }
             end
         }
     }
