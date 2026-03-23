@@ -31,35 +31,44 @@ type Pack = {
     package_size: string
 }
 
+local __semver = nil
+
+local function semver(version: string): any
+    if not __semver then
+        __semver = import("semver")
+    end
+    return __semver(version)
+end
+
 ------------------------------------------------- Constants -------------------------------------------------
 
 local BASE_URL = "https://launcher.gryphline.com"
 local APP_CODE = "YDUTE5gscDZ229CW"
 local UMU_VERSION = "1.3.0"
-local PROTON_VERSION = "dwproton-10.0-21"
-local PROTON_ARCHIVE_NAME = "dwproton-10.0-21-x86_64"
-local PROTON_URL = "https://dawn.wine/dawn-winery/dwproton/releases/download/dwproton-10.0-21/dwproton-10.0-21-x86_64.tar.xz"
+local PROTON_VERSION = "dwproton-10.0-22"
+local PROTON_ARCHIVE_NAME = "dwproton-10.0-22-x86_64"
+local PROTON_URL = "https://dawn.wine/dawn-winery/dwproton/releases/download/dwproton-10.0-22/dwproton-10.0-22-x86_64.tar.xz"
 
 ------------------------------------------------- Paths -------------------------------------------------
 
 local data_dir_path: string = path.persist_dir("endfield")
 
-local game_dir_path: string     = path.join(data_dir_path, "game")
-local game_version_path: string = path.join(game_dir_path, ".version")
-local game_binary_path: string  = path.join(game_dir_path, "Endfield.exe")
-local umu_dir_path: string      = path.join(data_dir_path, "umu")
-local umu_binary_path: string   = path.join(umu_dir_path, "umu-run")
-local proton_dir_path: string   = path.join(data_dir_path, "proton")
+local game_dir_path: string      = path.join(data_dir_path, "game")
+local game_version_path: string  = path.join(game_dir_path, ".version")
+local game_binary_path: string   = path.join(game_dir_path, "Endfield.exe")
+local umu_dir_path: string       = path.join(data_dir_path, "umu")
+local umu_binary_path: string    = path.join(umu_dir_path, "umu-run")
+local proton_dir_path: string    = path.join(data_dir_path, "proton")
 local proton_binary_path: string = path.join(proton_dir_path, PROTON_ARCHIVE_NAME, "files", "bin", "wine64")
-local prefix_dir_path: string   = path.join(data_dir_path, "prefix")
-local repair_flag_path: string  = path.join(data_dir_path, ".repair_requested")
+local prefix_dir_path: string    = path.join(data_dir_path, "prefix")
+local repair_flag_path: string   = path.join(data_dir_path, ".repair_requested")
 
 ------------------------------------------------- API Functions -------------------------------------------------
 
 local function batch_proxy_post(body: {[string]: any}): ({[string]: any}?, string?)
     local url = `{BASE_URL}/api/proxy/batch_proxy`
     local json_str = str.encode("json", body)
-    
+
     local response = http.fetch(url, {
         method = "post",
         headers = {
@@ -68,18 +77,18 @@ local function batch_proxy_post(body: {[string]: any}): ({[string]: any}?, strin
         },
         body = str.to_bytes(json_str)
     }):await()
-    
+
     if not response.is_ok then
         return nil, "HTTP request failed with status: " .. tostring(response.status)
     end
-    
+
     local response_str = str.from_bytes(response.body)
     local decoded = str.decode("json", response_str)
-    
+
     if not decoded then
         return nil, "Failed to parse JSON response"
     end
-    
+
     return decoded, nil
 end
 
@@ -97,21 +106,20 @@ local function get_latest_game_info(current_version: string?): ({version: string
             }
         }
     }
-    
+
     local response, err = batch_proxy_post(body)
     if err then
         return nil, err
     end
-    
+
     if not response or not response.proxy_rsps then
         return nil, "Invalid API response"
     end
-    
+
     for _, proxy_rsp in ipairs(response.proxy_rsps) do
         if proxy_rsp.get_latest_game_rsp then
             local game_rsp = proxy_rsp.get_latest_game_rsp
-            
-            -- Check for patch update first (if current_version was provided)
+
             if current_version and game_rsp.patch and game_rsp.patch.patches then
                 local patches = {}
                 for _, patch in ipairs(game_rsp.patch.patches) do
@@ -119,7 +127,7 @@ local function get_latest_game_info(current_version: string?): ({version: string
                         table.insert(patches, patch)
                     end
                 end
-                
+
                 if #patches > 0 then
                     return {
                         version = game_rsp.version,
@@ -128,8 +136,7 @@ local function get_latest_game_info(current_version: string?): ({version: string
                     }, nil
                 end
             end
-            
-            -- Fallback to full download
+
             if game_rsp.pkg and game_rsp.pkg.packs then
                 return {
                     version = game_rsp.version,
@@ -139,7 +146,7 @@ local function get_latest_game_info(current_version: string?): ({version: string
             end
         end
     end
-    
+
     return nil, "No game package found in API response"
 end
 
@@ -163,7 +170,7 @@ local function parse_command_wrapper(wrapper: string, command: string, args: {st
     local wrapper_parts = {}
     for _, part in ipairs(parts) do
         if part == "%command%" then
-            -- Placeholder
+            -- placeholder
         elseif string.match(part, "^[A-Z_][A-Z0-9_]*=") then
             local key, value = string.match(part, "^([^=]+)=(.*)$")
             if key and value then
@@ -177,17 +184,17 @@ local function parse_command_wrapper(wrapper: string, command: string, args: {st
 
     if has_wrapper_command then
         new_command = wrapper_parts[1]
-        
+
         local final_args = {}
         for i = 2, #wrapper_parts do
             table.insert(final_args, wrapper_parts[i])
         end
-        
+
         table.insert(final_args, command)
         for _, arg in ipairs(args) do
             table.insert(final_args, arg)
         end
-        
+
         new_args = final_args
     end
 
@@ -196,22 +203,21 @@ end
 
 local function process_delete_files()
     local delete_file_path = path.join(game_dir_path, "delete_files.txt")
-    
+
     if not fs.exists(delete_file_path) then
         return
     end
-    
+
     local content = str.from_bytes(fs.read_file(delete_file_path):await())
 
-    -- Collect all remove promises first, then await them all (async batch deletion)
     local remove_promises = {}
 
     for line in string.gmatch(content, "[^\r\n]+") do
         line = string.match(line, "^%s*(.-)%s*$")
-        
+
         if line and line ~= "" then
             local file_to_delete = path.join(game_dir_path, line)
-            
+
             if fs.exists(file_to_delete) then
                 table.insert(remove_promises, fs.remove(file_to_delete))
             end
@@ -223,12 +229,10 @@ local function process_delete_files()
             promise:await()
         end)
         if not ok then
-            -- Non-fatal: log and continue
             print("Warning: failed to delete file: " .. tostring(err))
         end
     end
-    
-    -- Remove delete_files.txt itself
+
     local ok, err = pcall(function()
         fs.remove(delete_file_path):await()
     end)
@@ -277,17 +281,46 @@ end
 
 ------------------------------------------------- Progress Formatting -------------------------------------------------
 
-local function format_progress(current: number, total: number): string
-    local current_mb = current / 1024 / 1024
-    local total_mb = total / 1024 / 1024
-    return string.format("%.2f MB / %.2f MB", current_mb, total_mb)
+local function format_progress(current: number, total: number, speed: number?)
+    local current_mb = string.format("%.2f", current / 1024 / 1024)
+    local total_mb   = string.format("%.2f", total   / 1024 / 1024)
+    return `{current_mb} MB / {total_mb} MB`
+end
+
+local function format_extract_progress(current: number, total: number)
+    local current_mb = string.format("%.2f", current / 1024 / 1024)
+    local total_mb   = string.format("%.2f", total   / 1024 / 1024)
+    return `{current_mb} MB / {total_mb} MB`
+end
+
+local function format_repair_progress(current: number, total: number, speed: number?)
+    local current_mb = string.format("%.2f", current / 1024 / 1024)
+    local total_mb   = string.format("%.2f", total   / 1024 / 1024)
+    return `{current_mb} MB / {total_mb} MB`
+end
+
+local function make_speed_tracker()
+    local last_bytes = 0
+    local last_time = system.utc_time()
+    local speed_bps = 0
+
+    return function(current: number): number
+        local now = system.utc_time()
+        local dt = now - last_time
+
+        if dt >= 1 then
+            speed_bps = (current - last_bytes) / dt
+            last_bytes = current
+            last_time = now
+        end
+
+        return speed_bps
+    end
 end
 
 ------------------------------------------------- Repair -------------------------------------------------
 
---- Extract the CDN version-tag segment from a pack URL.
---- URL structure after "beyond.hg-cdn.com": /{appcode}/{ver}/update/{ch}/{sub}/{platform}/{version_tag}/...
---- Counting non-empty path segments (1-indexed), the version_tag is segment 7.
+-- extracts the cdn version-tag (segment 7) from a pack url
 local function extract_version_tag(url: string): string?
     local cdn_path = string.match(url, "beyond%.hg%-cdn%.com(/.*)")
     if not cdn_path then return nil end
@@ -303,9 +336,7 @@ local function extract_version_tag(url: string): string?
     return nil
 end
 
---- Fetch the latest version, short_version, and CDN version_tag from the API.
---- Sends an empty current_version so we always get the full pkg response,
---- which is the only source of the version_tag we need for CDN repair URLs.
+-- fetches version, short_version and version_tag needed for repair urls
 local function get_repair_info(): ({version: string, version_tag: string, short_version: string}?, string?)
     local body = {
         proxy_reqs = {
@@ -335,15 +366,9 @@ local function get_repair_info(): ({version: string, version_tag: string, short_
                 return nil, "No version in API response"
             end
 
-            -- Derive short_version: "1.0.14" → "1.0"
-            local parts = {}
-            for part in string.gmatch(version, "[^.]+") do
-                table.insert(parts, part)
-            end
-            local short_version = (parts[1] or "0") .. "." .. (parts[2] or "0")
+            local sv = semver(version)
+            local short_version = sv.major .. "." .. sv.minor
 
-            -- Extract version_tag from pkg pack URLs (preferred), then pkg.url,
-            -- then patch URLs as a fallback — mirrors the Rust repair implementation.
             local version_tag = nil
 
             if game_rsp.pkg then
@@ -385,19 +410,15 @@ local function get_repair_info(): ({version: string, version_tag: string, short_
     return nil, "No game info in API response"
 end
 
---- Build a repair actions pipeline. Shared state is captured in upvalues so
---- each step can hand data forward to the next without global variables.
---- Returned directly from get_actions_pipeline when the repair flag is set.
+-- builds repair pipeline; state is shared between steps via upvalues
 local function build_repair_pipeline()
-    -- Upvalues shared across pipeline steps
-    local repair_info     = nil  -- set in step 1
-    local manifest_entries = {}  -- set in step 2
-    local broken_files    = {}   -- set in step 3
+    local repair_info      = nil
+    local manifest_entries = {}
+    local broken_files     = {}
 
     return {
         title = "Repair Endfield",
         pipeline = {
-            -- ── Step 1: fetch CDN version info ────────────────────────────
             {
                 title = "Fetch version info",
                 perform = function(updater)
@@ -415,7 +436,6 @@ local function build_repair_pipeline()
                 end
             },
 
-            -- ── Step 2: download and parse the manifest TSV ───────────────
             {
                 title = "Download manifest",
                 perform = function(updater)
@@ -449,16 +469,13 @@ local function build_repair_pipeline()
                 end
             },
 
-            -- ── Step 3: MD5-verify every file ─────────────────────────────
             {
                 title = "Verify game files",
                 perform = function(updater)
                     local total = #manifest_entries
                     broken_files = {}
 
-                    -- Throttle UI updates: sending a progress message per file
-                    -- floods the GTK message queue and freezes the launcher.
-                    -- Update every 50 files so the UI stays responsive.
+                    -- throttle ui updates to avoid flooding the gtk message queue
                     local UPDATE_INTERVAL = 50
 
                     for i, entry in ipairs(manifest_entries) do
@@ -486,7 +503,6 @@ local function build_repair_pipeline()
                 end
             },
 
-            -- ── Step 4: re-download broken files ──────────────────────────
             {
                 title = "Repair game files",
                 before = function()
@@ -505,15 +521,17 @@ local function build_repair_pipeline()
                             fs.create_dir(parent):await()
                         end
 
+                        local speed_tracker = make_speed_tracker()
                         local task = downloader.download(dl_handle, {
                             url = file_url,
                             output_file = dest,
                             continue_download = false,
                             on_update = function(current: number, file_total: number)
+                                local speed = speed_tracker(current)
                                 updater({
                                     current = current, total = file_total,
                                     format = function()
-                                        return `Repairing ({i}/{total}) {path.file_name(filename) or filename}: {format_progress(current, file_total)}`
+                                        return `Repairing ({i}/{total}) {path.file_name(filename) or filename}: {format_repair_progress(current, file_total, speed)}`
                                     end
                                 })
                             end
@@ -525,6 +543,253 @@ local function build_repair_pipeline()
                 end
             }
         }
+    }
+end
+
+------------------------------------------------- Install / Update Pipelines -------------------------------------------------
+
+local function build_umu_pipeline()
+    local umu_archive_path = path.join(path.temp_dir(), `umu-launcher-{UMU_VERSION}.tar`)
+
+    return {
+        title = "Install umu-launcher",
+        pipeline = {
+            {
+                title = "Download umu-launcher",
+                perform = function(updater)
+                    local speed_tracker = make_speed_tracker()
+                    local downloader_handle = downloader.create()
+                    local task_handle = downloader.download(downloader_handle, {
+                        url = `https://github.com/Open-Wine-Components/umu-launcher/releases/download/{UMU_VERSION}/umu-launcher-{UMU_VERSION}-zipapp.tar`,
+                        output_file = umu_archive_path,
+                        continue_download = true,
+                        on_update = function(current: number, total: number)
+                            local speed = speed_tracker(current)
+                            updater({
+                                current = current, total = total,
+                                format = function()
+                                    return format_progress(current, total, speed)
+                                end
+                            })
+                        end
+                    })
+                    downloader.wait(task_handle)
+                    downloader.close(downloader_handle)
+                end
+            },
+            {
+                title = "Extract umu-launcher",
+                perform = function(updater)
+                    if fs.exists(umu_dir_path) then
+                        fs.remove_dir(umu_dir_path):await()
+                    end
+
+                    fs.create_dir(data_dir_path):await()
+                    local handle: number = archive.open(umu_archive_path)
+
+                    archive.extract(handle, data_dir_path, function(current: number, total: number)
+                        updater({
+                            current = current, total = total,
+                            format = function()
+                                return format_extract_progress(current, total)
+                            end
+                        })
+                    end)
+
+                    archive.close(handle)
+                    fs.remove(umu_archive_path):await()
+                end
+            }
+        }
+    }
+end
+
+local function build_proton_pipeline()
+    local proton_archive_path = path.join(path.temp_dir(), `{PROTON_ARCHIVE_NAME}.tar.xz`)
+
+    return {
+        title = `Install {PROTON_ARCHIVE_NAME}`,
+        pipeline = {
+            {
+                title = "Download Proton",
+                perform = function(updater)
+                    local speed_tracker = make_speed_tracker()
+                    local downloader_handle = downloader.create()
+                    local task_handle = downloader.download(downloader_handle, {
+                        url = PROTON_URL,
+                        output_file = proton_archive_path,
+                        continue_download = true,
+                        on_update = function(current: number, total: number)
+                            local speed = speed_tracker(current)
+                            updater({
+                                current = current, total = total,
+                                format = function()
+                                    return format_progress(current, total, speed)
+                                end
+                            })
+                        end
+                    })
+                    downloader.wait(task_handle)
+                    downloader.close(downloader_handle)
+                end
+            },
+            {
+                title = "Extract Proton",
+                perform = function(updater)
+                    if fs.exists(proton_dir_path) then
+                        fs.remove_dir(proton_dir_path):await()
+                    end
+
+                    fs.create_dir(proton_dir_path):await()
+                    local handle: number = archive.open(proton_archive_path)
+
+                    archive.extract(handle, proton_dir_path, function(current: number, total: number)
+                        updater({
+                            current = current, total = total,
+                            format = function()
+                                return format_extract_progress(current, total)
+                            end
+                        })
+                    end)
+
+                    archive.close(handle)
+                    fs.remove(proton_archive_path):await()
+                end
+            }
+        }
+    }
+end
+
+local function build_update_pipeline(current_version: string?, game_info: {version: string?, packs: {Pack}?, is_patch: boolean?})
+    local packs = game_info.packs
+    local version = game_info.version or "unknown"
+    local is_patch = game_info.is_patch or false
+    local is_update = current_version ~= nil
+    local download_type = is_patch and "patch" or "game"
+
+    local steps = {}
+
+    if not is_patch then
+        table.insert(steps, {
+            title = "Delete old files",
+            before = function()
+                return fs.exists(game_dir_path) and not is_update
+            end,
+            perform = function()
+                fs.remove_dir(game_dir_path):await()
+                fs.create_dir(game_dir_path):await()
+            end
+        })
+    end
+
+    table.insert(steps, {
+        title = `Download {download_type} files ({#packs} parts)`,
+        perform = function(updater)
+            local speed_tracker = make_speed_tracker()
+            local downloader_handle = downloader.create()
+            local total_downloaded = 0
+            local total_size = 0
+
+            for _, pack in ipairs(packs) do
+                total_size = total_size + (tonumber(pack.package_size) or 0)
+            end
+
+            for idx, pack in ipairs(packs) do
+                local pack_path = path.join(path.temp_dir(), string.format("endfield_pack.zip.%03d", idx))
+                local pack_size = tonumber(pack.package_size) or 0
+
+                local task_handle = downloader.download(downloader_handle, {
+                    url = pack.url,
+                    output_file = pack_path,
+                    continue_download = true,
+                    on_update = function(current: number, total: number)
+                        local effective_total = total_size > 0 and total_size or total
+                        local global_current = total_downloaded + current
+                        local speed = speed_tracker(global_current)
+                        updater({
+                            current = global_current,
+                            total = effective_total,
+                            format = function()
+                                return format_progress(global_current, effective_total, speed)
+                            end
+                        })
+                    end
+                })
+                downloader.wait(task_handle)
+
+                total_downloaded = total_downloaded + pack_size
+            end
+
+            downloader.close(downloader_handle)
+        end
+    })
+
+    table.insert(steps, {
+        title = `Extract {download_type} files`,
+        perform = function(updater)
+            local total_size = 0
+            for _, pack in ipairs(packs) do
+                total_size = total_size + (tonumber(pack.package_size) or 0)
+            end
+
+            -- open only the first split part; the archive library reassembles the
+            -- remaining parts (.zip.002, .zip.003, …) automatically
+            local first_part_path = path.join(path.temp_dir(), "endfield_pack.zip.001")
+
+            archive.extract(
+                archive.open(first_part_path),
+                game_dir_path,
+                function(current: number, total: number, diff: number)
+                    updater({
+                        current = current,
+                        total = total_size,
+                        format = function()
+                            return format_extract_progress(current, total_size)
+                        end
+                    })
+                end
+            )
+
+            -- clean up all split parts
+            for idx, _ in ipairs(packs) do
+                local part_path = path.join(path.temp_dir(), string.format("endfield_pack.zip.%03d", idx))
+                if fs.exists(part_path) then
+                    fs.remove(part_path):await()
+                end
+            end
+        end
+    })
+
+    if is_patch then
+        table.insert(steps, {
+            title = "Clean up old files",
+            perform = function()
+                process_delete_files()
+            end
+        })
+    end
+
+    table.insert(steps, {
+        title = "Finalize installation",
+        perform = function()
+            set_game_version(version)
+        end
+    })
+
+    local action_title
+    if is_update then
+        if is_patch then
+            action_title = "Update Endfield (Patch)"
+        else
+            action_title = "Update Endfield (Full)"
+        end
+    else
+        action_title = "Install Endfield"
+    end
+
+    return {
+        title = action_title,
+        pipeline = steps
     }
 end
 
@@ -596,15 +861,22 @@ return function()
                     return nil
                 end
 
+                -- hide play when update is available so update becomes the primary action
+                local current_version = get_game_version()
+                local game_info, _ = get_latest_game_info(current_version)
+                if game_info and current_version ~= game_info.version then
+                    return nil
+                end
+
                 local settings = import_settings()
-                
+
                 local proton_path = path.join(proton_dir_path, PROTON_ARCHIVE_NAME)
                 local prefix_path = get_prefix_path(settings)
-                
+
                 if not fs.exists(prefix_path) then
                     fs.create_dir(prefix_path):await()
                 end
-                
+
                 local launch_info = {
                     binary = umu_binary_path,
                     args = { game_binary_path },
@@ -615,15 +887,13 @@ return function()
                         PROTONFIXES_DISABLE = "1",
                         WINEDEBUG = ""
                     },
-                    stdout = path.join(data_dir_path, "game.log"),
-                    stderr = path.join(data_dir_path, "game.log")
+                    log_file = path.join(data_dir_path, "game.log")
                 }
-                
-                -- Apply command wrappers
+
                 local current_binary = launch_info.binary
                 local current_args = launch_info.args or {}
                 local current_env = launch_info.env or {}
-                
+
                 local command_wrapper = settings.get_property("launcher.command_wrapper")
                 if command_wrapper and command_wrapper ~= "" then
                     current_binary, current_args, current_env = parse_command_wrapper(
@@ -633,7 +903,7 @@ return function()
                         current_env
                     )
                 end
-                
+
                 if settings.get_property("launcher.mangohud") then
                     current_binary, current_args, current_env = parse_command_wrapper(
                         "mangohud %command%",
@@ -642,259 +912,49 @@ return function()
                         current_env
                     )
                 end
-                
+
                 launch_info.binary = current_binary
                 launch_info.args = current_args
                 launch_info.env = current_env
-                
+
                 return launch_info
             end,
 
             get_actions_pipeline = function(variant: Variant)
-                -- A repair was queued via the Repair Game tool button.
-                -- Consume the flag immediately so a second call returns nil.
+                if not is_umu_installed() then
+                    return build_umu_pipeline()
+                end
+
+                if not is_proton_installed() then
+                    return build_proton_pipeline()
+                end
+
+                local current_version = nil
+                if is_game_installed() then
+                    current_version = get_game_version()
+                end
+
+                local game_info, err = get_latest_game_info(current_version)
+                if err then
+                    error("Failed to get game info from API: " .. err)
+                end
+
+                if not game_info or not game_info.packs then
+                    error("No download packs available")
+                end
+
+                -- update takes priority over repair
+                if not current_version or current_version ~= game_info.version then
+                    return build_update_pipeline(current_version, game_info)
+                end
+
+                -- game is up to date, check if repair was requested
                 if fs.exists(repair_flag_path) then
                     fs.remove(repair_flag_path):await()
                     return build_repair_pipeline()
                 end
 
-                -- Check for umu installation
-                if not is_umu_installed() then
-                    local umu_archive_path = path.join(path.temp_dir(), `umu-launcher-{UMU_VERSION}.tar`)
-                    
-                    return {
-                        title = "Install umu-launcher",
-                        pipeline = {
-                            {
-                                title = "Download umu-launcher",
-                                perform = function(updater)
-                                    local downloader_handle = downloader.create()
-                                    local task_handle = downloader.download(downloader_handle, {
-                                        url = `https://github.com/Open-Wine-Components/umu-launcher/releases/download/{UMU_VERSION}/umu-launcher-{UMU_VERSION}-zipapp.tar`,
-                                        output_file = umu_archive_path,
-                                        continue_download = true,
-                                        on_update = function(current: number, total: number)
-                                            updater({ current = current, total = total })
-                                        end
-                                    })
-                                    downloader.wait(task_handle)
-                                    downloader.close(downloader_handle)
-                                end
-                            },
-                            {
-                                title = "Extract umu-launcher",
-                                perform = function(updater)
-                                    if fs.exists(umu_dir_path) then
-                                        fs.remove_dir(umu_dir_path):await()
-                                    end
-
-                                    fs.create_dir(data_dir_path):await()
-                                    local handle: number = archive.open(umu_archive_path)
-
-                                    archive.extract(handle, data_dir_path, function(current: number, total: number)
-                                        updater({ current = current, total = total })
-                                    end)
-
-                                    archive.close(handle)
-                                    fs.remove(umu_archive_path):await()
-                                end
-                            }
-                        }
-                    }
-                end
-
-                -- Check for Proton installation
-                if not is_proton_installed() then
-                    local proton_archive_path = path.join(path.temp_dir(), `{PROTON_ARCHIVE_NAME}.tar.xz`)
-                    
-                    return {
-                        title = `Install {PROTON_ARCHIVE_NAME}`,
-                        pipeline = {
-                            {
-                                title = "Download Proton",
-                                perform = function(updater)
-                                    local downloader_handle = downloader.create()
-                                    local task_handle = downloader.download(downloader_handle, {
-                                        url = PROTON_URL,
-                                        output_file = proton_archive_path,
-                                        continue_download = true,
-                                        on_update = function(current: number, total: number)
-                                            updater({ current = current, total = total })
-                                        end
-                                    })
-                                    downloader.wait(task_handle)
-                                    downloader.close(downloader_handle)
-                                end
-                            },
-                            {
-                                title = "Extract Proton",
-                                perform = function(updater)
-                                    if fs.exists(proton_dir_path) then
-                                        fs.remove_dir(proton_dir_path):await()
-                                    end
-
-                                    fs.create_dir(proton_dir_path):await()
-                                    local handle: number = archive.open(proton_archive_path)
-
-                                    archive.extract(handle, proton_dir_path, function(current: number, total: number)
-                                        updater({ current = current, total = total })
-                                    end)
-
-                                    archive.close(handle)
-                                    fs.remove(proton_archive_path):await()
-                                end
-                            }
-                        }
-                    }
-                end
-                
-                -- Determine if we need to install or update
-                local current_version = nil
-                local is_update = false
-                
-                if is_game_installed() then
-                    current_version = get_game_version()
-                    if current_version then
-                        is_update = true
-                    end
-                end
-
-                -- Get download info from API (with current version for patch check)
-                local game_info, err = get_latest_game_info(current_version)
-                if err then
-                    error("Failed to get game info from API: " .. err)
-                end
-                
-                if not game_info or not game_info.packs then
-                    error("No download packs available")
-                end
-
-                -- If installed and versions match, no update needed
-                if is_update and current_version == game_info.version then
-                    return nil
-                end
-
-                local packs = game_info.packs
-                local version = game_info.version or "unknown"
-                local is_patch = game_info.is_patch or false
-
-                -- Build download pipeline
-                local download_steps = {}
-                
-                -- Delete old files (only for fresh install, not patch)
-                if not is_patch then
-                    table.insert(download_steps, {
-                        title = "Delete old files",
-                        before = function()
-                            return fs.exists(game_dir_path) and not is_update
-                        end,
-                        perform = function()
-                            fs.remove_dir(game_dir_path):await()
-                            fs.create_dir(game_dir_path):await()
-                        end
-                    })
-                end
-
-                -- Download files
-                local download_type = is_patch and "patch" or "game"
-                table.insert(download_steps, {
-                    title = `Download {download_type} files ({#packs} parts)`,
-                    perform = function(updater)
-                        local downloader_handle = downloader.create()
-                        local total_downloaded = 0
-                        local total_size = 0
-
-                        -- Calculate total size
-                        for _, pack in ipairs(packs) do
-                            total_size = total_size + tonumber(pack.package_size)
-                        end
-
-                        -- Download all parts
-                        for idx, pack in ipairs(packs) do
-                            local pack_path = path.join(path.temp_dir(), `endfield_pack_{idx}.zip`)
-
-                            local task_handle = downloader.download(downloader_handle, {
-                                url = pack.url,
-                                output_file = pack_path,
-                                continue_download = true,
-                                on_update = function(current: number, total: number)
-                                    updater({
-                                        current = total_downloaded + current,
-                                        total = total_size
-                                    })
-                                end
-                            })
-                            downloader.wait(task_handle)
-
-                            total_downloaded = total_downloaded + tonumber(pack.package_size)
-                        end
-
-                        downloader.close(downloader_handle)
-                    end
-                })
-                
-                -- Extraction part
-                table.insert(download_steps, {
-                    title = `Extract {download_type} files`,
-                    perform = function(updater)
-                        -- Calculate total size for progress tracking
-                        local total_size = 0
-                        for _, pack in ipairs(packs) do
-                            total_size = total_size + tonumber(pack.package_size)
-                        end
-
-                        local bytes_extracted = 0
-
-                        -- Extract each part sequentially
-                        for idx, pack in ipairs(packs) do
-                            local pack_path = path.join(path.temp_dir(), `endfield_pack_{idx}.zip`)
-                            local pack_size = tonumber(pack.package_size)
-
-                            local part_start = bytes_extracted
-
-                            archive.extract(
-                                archive.open(pack_path),
-                                game_dir_path,
-                                function(current: number, total: number, diff: number)
-                                    updater({
-                                        current = part_start + current,
-                                        total = total_size
-                                    })
-                                end
-                            )
-
-                            bytes_extracted = bytes_extracted + pack_size
-
-                            -- Remove the part after extraction
-                            fs.remove(pack_path):await()
-                        end
-                    end
-                })
-
-                -- Process delete_files.txt (for patches)
-                if is_patch then
-                    table.insert(download_steps, {
-                        title = "Clean up old files",
-                        perform = function()
-                            process_delete_files()
-                        end
-                    })
-                end
-
-                -- Write version file
-                table.insert(download_steps, {
-                    title = "Finalize installation",
-                    perform = function()
-                        set_game_version(version)
-                    end
-                })
-
-                local action_title = is_update and (is_patch and "Update Endfield (Patch)" or "Update Endfield (Full)") or "Install Endfield"
-                
-                return {
-                    title = action_title,
-                    pipeline = download_steps
-                }
+                return nil
             end
         },
 
@@ -916,9 +976,7 @@ return function()
         },
 
         tools = {
-            --- Return the list of tool buttons shown in the launcher UI.
-            --- Buttons are only available once the game, UMU, and Proton are
-            --- all fully installed.
+            -- returns tool buttons shown in the launcher ui
             get_buttons = function(variant: Variant)
                 if not is_game_installed() or not is_umu_installed() or not is_proton_installed() then
                     return {}
@@ -937,7 +995,6 @@ return function()
                 }
 
                 return {
-                    -- ── Wine Configuration ────────────────────────────────
                     {
                         title = "Wine Configuration",
                         description = "Open winecfg to adjust Wine settings for Endfield",
@@ -946,7 +1003,6 @@ return function()
                         end
                     },
 
-                    -- ── Wine Console ──────────────────────────────────────
                     {
                         title = "Wine Console",
                         description = "Open an interactive Wine console inside the prefix",
@@ -955,7 +1011,6 @@ return function()
                         end
                     },
 
-                    -- ── Remake Wine Prefix ────────────────────────────────
                     {
                         title = "Remake Wine Prefix",
                         description = "Delete and reinitialise the Wine prefix (resets all Wine settings)",
@@ -974,7 +1029,6 @@ return function()
                                             end
                                             fs.create_dir(prefix_path):await()
 
-                                            -- Initialise the fresh prefix
                                             local handle = process.open(
                                                 umu_binary_path,
                                                 { "wineboot", "--init" },
@@ -990,15 +1044,11 @@ return function()
                         end
                     },
 
-                    -- ── Repair Game ───────────────────────────────────────
                     {
                         title = "Repair Game",
                         description = "Verify all game files against the upstream manifest and redownload any that are missing or corrupted",
                         callback = function()
-                            -- Write a flag file so get_actions_pipeline returns the
-                            -- repair pipeline on the next UpdateGameInfo cycle.
-                            -- The launcher calls UpdateGameInfo right after every
-                            -- button press, so the pipeline appears immediately.
+                            -- write flag file so get_actions_pipeline returns repair pipeline on next cycle
                             fs.write_file(repair_flag_path, str.to_bytes("")):await()
 
                             portal.toast({
@@ -1012,6 +1062,14 @@ return function()
                                     end
                                 }
                             })
+                        end
+                    },
+
+                    {
+                        title = "Open Integration Folder",
+                        description = "Open the Endfield integration folder in your file manager",
+                        callback = function()
+                            process.open("xdg-open", { data_dir_path }, {})
                         end
                     }
                 }

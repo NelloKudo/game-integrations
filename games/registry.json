@@ -28,6 +28,10 @@
         {
             "url": "http://127.0.0.1:8080/games/endfield/manifest.json",
             "featured": true
+        },
+        {
+            "url": "http://127.0.0.1:8080/games/nikke/manifest.json",
+            "featured": true
         }
     ]
 }
