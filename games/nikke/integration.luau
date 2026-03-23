@@ -490,8 +490,7 @@ return function()
                         WINEPREFIX          = path.join(prefix_path, "pfx"),
                         GAMEID              = get_gameid(settings),
                         WINEDEBUG           = ""
-                    },
-                    log_file = path.join(data_dir_path, "game.log")
+                    }
                 }
 
                 local current_binary = launch_info.binary
