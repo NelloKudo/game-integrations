@@ -25,7 +25,7 @@ type Variant = {
     edition: string
 }
 
-------------------------------------------------- Constants -------------------------------------------------
+------------------------------------------------- constants -------------------------------------------------
 
 local NIKKE_SITE_BASE    = "https://nikke-en.com"
 local NIKKE_ASSETS_JS    = NIKKE_SITE_BASE .. "/assets/aix-18872c9c.js"
@@ -34,7 +34,11 @@ local PROTON_VERSION     = "dwproton-10.0-22"
 local PROTON_ARCHIVE_NAME = "dwproton-10.0-22-x86_64"
 local PROTON_URL         = "https://dawn.wine/dawn-winery/dwproton/releases/download/dwproton-10.0-22/dwproton-10.0-22-x86_64.tar.xz"
 
-------------------------------------------------- Paths -------------------------------------------------
+-- launch retry: seconds to wait before checking --ProductName=nikke_launcher
+local LAUNCH_MAX_RETRIES  = 10
+local LAUNCH_WAIT_SECONDS = 8
+
+------------------------------------------------- paths -------------------------------------------------
 
 local data_dir_path: string    = path.persist_dir("nikke")
 
@@ -44,7 +48,7 @@ local proton_dir_path: string  = path.join(data_dir_path, "proton")
 local proton_binary_path: string = path.join(proton_dir_path, PROTON_ARCHIVE_NAME, "files", "bin", "wine64")
 local prefix_dir_path: string  = path.join(data_dir_path, "prefix")
 
-------------------------------------------------- Component Management -------------------------------------------------
+------------------------------------------------- component management -------------------------------------------------
 
 local function is_umu_installed(): boolean
     return fs.exists(umu_binary_path)
@@ -54,7 +58,7 @@ local function is_proton_installed(): boolean
     return fs.exists(proton_binary_path)
 end
 
-------------------------------------------------- Game detection -------------------------------------------------
+------------------------------------------------- game detection -------------------------------------------------
 
 local function get_prefix_path(settings): string
     local prefix_name = settings.get_property("runner.prefix") or "nikke"
@@ -65,16 +69,14 @@ local function get_gameid(settings): string
     return settings.get_property("runner.gameid") or "umu-nikke"
 end
 
--- Returns true when the NIKKE launcher exe exists inside the prefix
 local function is_game_installed(settings): boolean
     local nikke_launcher = path.join(get_prefix_path(settings), "pfx", "drive_c", "NIKKE", "Launcher", "nikke_launcher.exe")
     return fs.exists(nikke_launcher)
 end
 
-------------------------------------------------- Installer version discovery -------------------------------------------------
+------------------------------------------------- installer version discovery -------------------------------------------------
 
--- Fetches the JS bundle from nikke-en.com and extracts the miniloader path,
--- e.g.  /nikkeminiloader0.0.6.346.exe  →  constant E in the bundle
+-- fetches the js bundle and extracts the miniloader download url
 local function get_installer_info(): ({url: string, filename: string}?, string?)
     local resp = http.fetch(NIKKE_ASSETS_JS, { method = "get" }):await()
 
@@ -84,8 +86,6 @@ local function get_installer_info(): ({url: string, filename: string}?, string?)
 
     local body = str.from_bytes(resp.body)
 
-    -- The bundle contains:  E="/nikkeminiloader0.x.y.z.exe"
-    -- We match the path segment that starts with /nikkeminiloader
     local loader_path = string.match(body, '"(/nikkeminiloader[^"]+%.exe)"')
     if not loader_path then
         return nil, "Could not extract miniloader path from JS bundle"
@@ -97,7 +97,7 @@ local function get_installer_info(): ({url: string, filename: string}?, string?)
     return { url = url, filename = filename }, nil
 end
 
-------------------------------------------------- Progress / speed helpers -------------------------------------------------
+------------------------------------------------- progress / speed helpers -------------------------------------------------
 
 local function format_progress(current: number, total: number)
     local current_mb = string.format("%.2f", current / 1024 / 1024)
@@ -128,7 +128,49 @@ local function make_speed_tracker()
     end
 end
 
-------------------------------------------------- Command wrapper -------------------------------------------------
+------------------------------------------------- Launch wrapper -------------------------------------------------
+
+-- writes a bash script that retries the launch when nikke_launcher never appears.
+-- invoked via /bin/bash so no chmod needed (process is not available in get_launch_info).
+local function create_launch_wrapper(prefix_path: string): string
+    local wrapper_path    = path.join(data_dir_path, "nikke-launch-wrapper.sh")
+    local wineserver_path = path.join(proton_dir_path, PROTON_ARCHIVE_NAME, "files", "bin", "wineserver")
+    local wineprefix      = path.join(prefix_path, "pfx")
+
+    local script = string.format(
+        "MAX_RETRIES=%d\n"
+        .. "WAIT_SECONDS=%d\n"
+        .. "WINEPREFIX_PATH=%q\n"
+        .. "WINESERVER=%q\n"
+        .. "\n"
+        .. "for attempt in $(seq 1 \"$MAX_RETRIES\"); do\n"
+        .. '    "$@" &\n'
+        .. "    GAME_PID=$!\n"
+        .. '    sleep "$WAIT_SECONDS"\n'
+        .. "    if ps aux | grep -q '[--]ProductName=nikke_launcher'; then\n"
+        .. '        wait "$GAME_PID"\n'
+        .. "        exit $?\n"
+        .. "    else\n"
+        .. '        echo "[nikke-wrapper] attempt $attempt: nikke_launcher not detected, retrying..."\n'
+        .. '        WINEPREFIX="$WINEPREFIX_PATH" "$WINESERVER" -k 2>/dev/null\n'
+        .. '        kill "$GAME_PID" 2>/dev/null\n'
+        .. "        sleep 3\n"
+        .. "    fi\n"
+        .. "done\n"
+        .. 'echo "[nikke-wrapper] all $MAX_RETRIES attempts exhausted"\n'
+        .. "exit 1\n",
+        LAUNCH_MAX_RETRIES,
+        LAUNCH_WAIT_SECONDS,
+        wineprefix,
+        wineserver_path
+    )
+
+    fs.write_file(wrapper_path, str.to_bytes(script)):await()
+
+    return wrapper_path
+end
+
+------------------------------------------------- command wrapper -------------------------------------------------
 
 local function parse_command_wrapper(wrapper: string, command: string, args: {string}, env: {[string]: string}?): (string, {string}, {[string]: string})
     if not wrapper or wrapper == "" then
@@ -176,7 +218,7 @@ local function parse_command_wrapper(wrapper: string, command: string, args: {st
     return new_command, new_args, new_env
 end
 
-------------------------------------------------- Pipelines -------------------------------------------------
+------------------------------------------------- pipelines -------------------------------------------------
 
 local function build_umu_pipeline()
     local umu_archive_path = path.join(path.temp_dir(), `umu-launcher-{UMU_VERSION}.tar`)
@@ -323,12 +365,8 @@ local function build_installer_pipeline(settings)
                         fs.create_dir(prefix_path):await()
                     end
 
-                    local drive_c_tmp = path.join(prefix_path, "pfx", "drive_c", "windows", "temp")
-                    if not fs.exists(drive_c_tmp) then
-                        fs.create_dir(drive_c_tmp):await()
-                    end
-
-                    local dest = path.join(drive_c_tmp, installer_info_cache.filename)
+                    
+                    local dest = path.join(path.temp_dir(), installer_info_cache.filename)
                     local speed_tracker     = make_speed_tracker()
                     local downloader_handle = downloader.create()
 
@@ -349,7 +387,7 @@ local function build_installer_pipeline(settings)
                     downloader.wait(task_handle)
                     downloader.close(downloader_handle)
 
-                    installer_info_cache.wine_path = `C:\\windows\\temp\\{installer_info_cache.filename}`
+                    installer_info_cache.wine_path = dest
                 end
             },
             {
@@ -373,8 +411,6 @@ local function build_installer_pipeline(settings)
                         WINEDEBUG  = ""
                     }
 
-                    -- installer was already downloaded into drive_c_tmp by the previous step;
-                    -- just store the wine_env so the run-installer step can use it
                     installer_info_cache.wine_env  = wine_env
 
                     updater({
@@ -408,7 +444,7 @@ local function build_installer_pipeline(settings)
     }
 end
 
-------------------------------------------------- Settings -------------------------------------------------
+------------------------------------------------- settings -------------------------------------------------
 
 local __settings = nil
 
@@ -462,7 +498,7 @@ local function import_settings()
     return __settings
 end
 
-------------------------------------------------- Module -------------------------------------------------
+------------------------------------------------- module -------------------------------------------------
 
 return function()
     return {
@@ -482,9 +518,12 @@ return function()
                 local nikke_launcher = path.join(prefix_path, "pfx", "drive_c", "NIKKE", "Launcher", "nikke_launcher.exe")
                 local proton_path    = path.join(proton_dir_path, PROTON_ARCHIVE_NAME)
 
+                -- retry wrapper: kill wineserver + relaunch if nikke_launcher never appears
+                local wrapper_path = create_launch_wrapper(prefix_path)
+
                 local launch_info = {
-                    binary = umu_binary_path,
-                    args   = { nikke_launcher },
+                    binary = "/bin/bash",
+                    args   = { wrapper_path, umu_binary_path, nikke_launcher },
                     env    = {
                         PROTONPATH          = proton_path,
                         WINEPREFIX          = path.join(prefix_path, "pfx"),
@@ -524,24 +563,20 @@ return function()
             end,
 
             get_actions_pipeline = function(variant: Variant)
-                -- Step 1: umu
                 if not is_umu_installed() then
                     return build_umu_pipeline()
                 end
 
-                -- Step 2: Proton
                 if not is_proton_installed() then
                     return build_proton_pipeline()
                 end
 
                 local settings = import_settings()
 
-                -- Step 3: installer (game not yet present inside the prefix)
                 if not is_game_installed(settings) then
                     return build_installer_pipeline(settings)
                 end
 
-                -- Game is installed and up to date — nothing to do
                 return nil
             end
         },
@@ -598,13 +633,13 @@ return function()
                     },
 
                     {
-                        title       = "Kill Wine",
+                        title       = "Kill Wineserver",
                         description = "Send wineserver -k to immediately stop all Wine processes in the prefix",
                         callback    = function()
                             local wineserver_path = path.join(proton_dir_path, PROTON_ARCHIVE_NAME, "files", "bin", "wineserver")
-                            process.exec(wineserver_path, { "-k" }, {
+                            process.wait(process.open(wineserver_path, { "-k" }, {
                                 WINEPREFIX = path.join(prefix_path, "pfx")
-                            }):await()
+                            }))
                         end
                     },
 

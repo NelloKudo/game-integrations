@@ -40,7 +40,7 @@ local function semver(version: string): any
     return __semver(version)
 end
 
-------------------------------------------------- Constants -------------------------------------------------
+------------------------------------------------- constants -------------------------------------------------
 
 local BASE_URL = "https://launcher.gryphline.com"
 local APP_CODE = "YDUTE5gscDZ229CW"
@@ -49,7 +49,7 @@ local PROTON_VERSION = "dwproton-10.0-22"
 local PROTON_ARCHIVE_NAME = "dwproton-10.0-22-x86_64"
 local PROTON_URL = "https://dawn.wine/dawn-winery/dwproton/releases/download/dwproton-10.0-22/dwproton-10.0-22-x86_64.tar.xz"
 
-------------------------------------------------- Paths -------------------------------------------------
+------------------------------------------------- paths -------------------------------------------------
 
 local data_dir_path: string = path.persist_dir("endfield")
 
@@ -63,7 +63,7 @@ local proton_binary_path: string = path.join(proton_dir_path, PROTON_ARCHIVE_NAM
 local prefix_dir_path: string    = path.join(data_dir_path, "prefix")
 local repair_flag_path: string   = path.join(data_dir_path, ".repair_requested")
 
-------------------------------------------------- API Functions -------------------------------------------------
+------------------------------------------------- api -------------------------------------------------
 
 local function batch_proxy_post(body: {[string]: any}): ({[string]: any}?, string?)
     local url = `{BASE_URL}/api/proxy/batch_proxy`
@@ -150,7 +150,7 @@ local function get_latest_game_info(current_version: string?): ({version: string
     return nil, "No game package found in API response"
 end
 
-------------------------------------------------- Command Wrapper -------------------------------------------------
+------------------------------------------------- command wrapper -------------------------------------------------
 
 local function parse_command_wrapper(wrapper: string, command: string, args: {string}, env: {[string]: string}?): (string, {string}, {[string]: string})
     if not wrapper or wrapper == "" then
@@ -170,7 +170,6 @@ local function parse_command_wrapper(wrapper: string, command: string, args: {st
     local wrapper_parts = {}
     for _, part in ipairs(parts) do
         if part == "%command%" then
-            -- placeholder
         elseif string.match(part, "^[A-Z_][A-Z0-9_]*=") then
             local key, value = string.match(part, "^([^=]+)=(.*)$")
             if key and value then
@@ -241,7 +240,7 @@ local function process_delete_files()
     end
 end
 
-------------------------------------------------- Version Management -------------------------------------------------
+------------------------------------------------- version management -------------------------------------------------
 
 local function get_game_version(): string?
     if not fs.exists(game_version_path) then
@@ -260,14 +259,38 @@ local function is_game_installed(): boolean
     return fs.exists(game_binary_path) and fs.exists(path.join(data_folder, "globalgamemanagers"))
 end
 
-------------------------------------------------- Component Management -------------------------------------------------
+------------------------------------------------- component management -------------------------------------------------
 
 local function is_umu_installed(): boolean
     return fs.exists(umu_binary_path)
 end
 
-local function is_proton_installed(): boolean
-    return fs.exists(proton_binary_path)
+-- scans proton_dir_path for runners that have a valid wine64 binary.
+-- always includes PROTON_ARCHIVE_NAME so it can be installed if missing.
+local function get_available_protons(): { [string]: string }
+    local protons = { [PROTON_ARCHIVE_NAME] = PROTON_ARCHIVE_NAME }
+
+    if not fs.exists(proton_dir_path) then
+        return protons
+    end
+
+    for _, entry in fs.read_dir(proton_dir_path):await() do
+        if entry.type == "directory" and entry.name ~= PROTON_ARCHIVE_NAME then
+            if fs.exists(path.join(entry.path, "files", "bin", "wine64")) then
+                protons[entry.name] = entry.name
+            end
+        end
+    end
+
+    return protons
+end
+
+local function get_proton_name(settings): string
+    return settings.get_property("runner.proton") or PROTON_ARCHIVE_NAME
+end
+
+local function is_proton_installed(settings): boolean
+    return fs.exists(path.join(proton_dir_path, get_proton_name(settings), "files", "bin", "wine64"))
 end
 
 local function get_prefix_path(settings): string
@@ -279,7 +302,7 @@ local function get_gameid(settings): string
     return settings.get_property("runner.gameid") or "umu-endfield"
 end
 
-------------------------------------------------- Progress Formatting -------------------------------------------------
+------------------------------------------------- progress / speed helpers -------------------------------------------------
 
 local function format_progress(current: number, total: number, speed: number?)
     local current_mb = string.format("%.2f", current / 1024 / 1024)
@@ -318,9 +341,8 @@ local function make_speed_tracker()
     end
 end
 
-------------------------------------------------- Repair -------------------------------------------------
+------------------------------------------------- repair -------------------------------------------------
 
--- extracts the cdn version-tag (segment 7) from a pack url
 local function extract_version_tag(url: string): string?
     local cdn_path = string.match(url, "beyond%.hg%-cdn%.com(/.*)")
     if not cdn_path then return nil end
@@ -336,7 +358,6 @@ local function extract_version_tag(url: string): string?
     return nil
 end
 
--- fetches version, short_version and version_tag needed for repair urls
 local function get_repair_info(): ({version: string, version_tag: string, short_version: string}?, string?)
     local body = {
         proxy_reqs = {
@@ -410,7 +431,6 @@ local function get_repair_info(): ({version: string, version_tag: string, short_
     return nil, "No game info in API response"
 end
 
--- builds repair pipeline; state is shared between steps via upvalues
 local function build_repair_pipeline()
     local repair_info      = nil
     local manifest_entries = {}
@@ -546,7 +566,7 @@ local function build_repair_pipeline()
     }
 end
 
-------------------------------------------------- Install / Update Pipelines -------------------------------------------------
+------------------------------------------------- pipelines -------------------------------------------------
 
 local function build_umu_pipeline()
     local umu_archive_path = path.join(path.temp_dir(), `umu-launcher-{UMU_VERSION}.tar`)
@@ -732,8 +752,7 @@ local function build_update_pipeline(current_version: string?, game_info: {versi
                 total_size = total_size + (tonumber(pack.package_size) or 0)
             end
 
-            -- open only the first split part; the archive library reassembles the
-            -- remaining parts (.zip.002, .zip.003, …) automatically
+            -- archive lib reassembles split parts (.zip.002, …) automatically
             local first_part_path = path.join(path.temp_dir(), "endfield_pack.zip.001")
 
             archive.extract(
@@ -793,7 +812,7 @@ local function build_update_pipeline(current_version: string?, game_info: {versi
     }
 end
 
-------------------------------------------------- Imports -------------------------------------------------
+------------------------------------------------- settings -------------------------------------------------
 
 local __settings = nil
 
@@ -837,6 +856,16 @@ local function import_settings()
                                 format = "text",
                                 default = "endfield"
                             }
+                        },
+                        proton = {
+                            title = "Proton runner",
+                            description = "runners are read from the proton folder; add a custom one there and reopen settings",
+                            reactivity = "release",
+                            entry = {
+                                format = "enum",
+                                values = get_available_protons(),
+                                default = PROTON_ARCHIVE_NAME
+                            }
                         }
                     }
                 }
@@ -847,7 +876,7 @@ local function import_settings()
     return __settings
 end
 
-------------------------------------------------- Module -------------------------------------------------
+------------------------------------------------- module -------------------------------------------------
 
 return function()
     return {
@@ -857,7 +886,13 @@ return function()
                     return nil
                 end
 
-                if not is_umu_installed() or not is_proton_installed() then
+                if not is_umu_installed() then
+                    return nil
+                end
+
+                local settings = import_settings()
+
+                if not is_proton_installed(settings) then
                     return nil
                 end
 
@@ -868,9 +903,7 @@ return function()
                     return nil
                 end
 
-                local settings = import_settings()
-
-                local proton_path = path.join(proton_dir_path, PROTON_ARCHIVE_NAME)
+                local proton_path = path.join(proton_dir_path, get_proton_name(settings))
                 local prefix_path = get_prefix_path(settings)
 
                 if not fs.exists(prefix_path) then
@@ -924,7 +957,9 @@ return function()
                     return build_umu_pipeline()
                 end
 
-                if not is_proton_installed() then
+                local settings = import_settings()
+
+                if not is_proton_installed(settings) then
                     return build_proton_pipeline()
                 end
 
@@ -969,20 +1004,21 @@ return function()
             end,
 
             get_layout = function(variant: Variant)
+                __settings = nil  -- force fresh proton scan each time settings are opened
                 local settings = import_settings()
                 return settings.get_layout(variant)
             end
         },
 
         tools = {
-            -- returns tool buttons shown in the launcher ui
             get_buttons = function(variant: Variant)
-                if not is_game_installed() or not is_umu_installed() or not is_proton_installed() then
+                local settings = import_settings()
+
+                if not is_game_installed() or not is_umu_installed() or not is_proton_installed(settings) then
                     return {}
                 end
 
-                local settings = import_settings()
-                local proton_path = path.join(proton_dir_path, PROTON_ARCHIVE_NAME)
+                local proton_path = path.join(proton_dir_path, get_proton_name(settings))
                 local prefix_path = get_prefix_path(settings)
 
                 local wine_env = {
@@ -1047,7 +1083,6 @@ return function()
                         title = "Repair Game",
                         description = "Verify all game files against the upstream manifest and redownload any that are missing or corrupted",
                         callback = function()
-                            -- write flag file so get_actions_pipeline returns repair pipeline on next cycle
                             fs.write_file(repair_flag_path, str.to_bytes("")):await()
 
                             portal.toast({
@@ -1061,6 +1096,17 @@ return function()
                                     end
                                 }
                             })
+                        end
+                    },
+
+                    {
+                        title       = "Kill Wineserver",
+                        description = "Send wineserver -k to immediately stop all Wine processes in the prefix",
+                        callback    = function()
+                            local wineserver_path = path.join(proton_dir_path, PROTON_ARCHIVE_NAME, "files", "bin", "wineserver")
+                            process.wait(process.open(wineserver_path, { "-k" }, {
+                                WINEPREFIX = path.join(prefix_path, "pfx")
+                            }))
                         end
                     },
 
