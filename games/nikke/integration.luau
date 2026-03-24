@@ -54,8 +54,32 @@ local function is_umu_installed(): boolean
     return fs.exists(umu_binary_path)
 end
 
-local function is_proton_installed(): boolean
-    return fs.exists(proton_binary_path)
+-- scans proton_dir_path for runners that have a valid wine64 binary.
+-- always includes PROTON_ARCHIVE_NAME so it can be installed if missing.
+local function get_available_protons(): { [string]: string }
+    local protons = { [PROTON_ARCHIVE_NAME] = PROTON_ARCHIVE_NAME }
+
+    if not fs.exists(proton_dir_path) then
+        return protons
+    end
+
+    for _, entry in fs.read_dir(proton_dir_path):await() do
+        if entry.type == "directory" and entry.name ~= PROTON_ARCHIVE_NAME then
+            if fs.exists(path.join(entry.path, "files", "bin", "wine64")) then
+                protons[entry.name] = entry.name
+            end
+        end
+    end
+
+    return protons
+end
+
+local function get_proton_name(settings): string
+    return settings.get_property("runner.proton") or PROTON_ARCHIVE_NAME
+end
+
+local function is_proton_installed(settings): boolean
+    return fs.exists(path.join(proton_dir_path, get_proton_name(settings), "files", "bin", "wine64"))
 end
 
 ------------------------------------------------- game detection -------------------------------------------------
@@ -132,9 +156,9 @@ end
 
 -- writes a bash script that retries the launch when nikke_launcher never appears.
 -- invoked via /bin/bash so no chmod needed (process is not available in get_launch_info).
-local function create_launch_wrapper(prefix_path: string): string
+local function create_launch_wrapper(prefix_path: string, proton_name: string): string
     local wrapper_path    = path.join(data_dir_path, "nikke-launch-wrapper.sh")
-    local wineserver_path = path.join(proton_dir_path, PROTON_ARCHIVE_NAME, "files", "bin", "wineserver")
+    local wineserver_path = path.join(proton_dir_path, proton_name, "files", "bin", "wineserver")
     local wineprefix      = path.join(prefix_path, "pfx")
 
     local script = string.format(
@@ -403,7 +427,7 @@ local function build_installer_pipeline(settings)
                         fs.create_dir(prefix_path):await()
                     end
 
-                    local proton_path = path.join(proton_dir_path, PROTON_ARCHIVE_NAME)
+                    local proton_path = path.join(proton_dir_path, get_proton_name(settings))
                     local wine_env = {
                         PROTONPATH = proton_path,
                         WINEPREFIX = path.join(prefix_path, "pfx"),
@@ -488,6 +512,16 @@ local function import_settings()
                                 format = "text",
                                 default = "nikke"
                             }
+                        },
+                        proton = {
+                            title = "Proton runner",
+                            description = "runners are read from the proton folder; add a custom one there and reopen settings",
+                            reactivity = "release",
+                            entry = {
+                                format = "enum",
+                                values = get_available_protons(),
+                                default = PROTON_ARCHIVE_NAME
+                            }
                         }
                     }
                 }
@@ -504,11 +538,16 @@ return function()
     return {
         game = {
             get_launch_info = function(variant: Variant)
-                if not is_umu_installed() or not is_proton_installed() then
+                if not is_umu_installed() then
                     return nil
                 end
 
                 local settings    = import_settings()
+
+                if not is_proton_installed(settings) then
+                    return nil
+                end
+
                 local prefix_path = get_prefix_path(settings)
 
                 if not is_game_installed(settings) then
@@ -516,10 +555,10 @@ return function()
                 end
 
                 local nikke_launcher = path.join(prefix_path, "pfx", "drive_c", "NIKKE", "Launcher", "nikke_launcher.exe")
-                local proton_path    = path.join(proton_dir_path, PROTON_ARCHIVE_NAME)
+                local proton_path    = path.join(proton_dir_path, get_proton_name(settings))
 
                 -- retry wrapper: kill wineserver + relaunch if nikke_launcher never appears
-                local wrapper_path = create_launch_wrapper(prefix_path)
+                local wrapper_path = create_launch_wrapper(prefix_path, get_proton_name(settings))
 
                 local launch_info = {
                     binary = "/bin/bash",
@@ -567,11 +606,11 @@ return function()
                     return build_umu_pipeline()
                 end
 
-                if not is_proton_installed() then
+                local settings = import_settings()
+
+                if not is_proton_installed(settings) then
                     return build_proton_pipeline()
                 end
-
-                local settings = import_settings()
 
                 if not is_game_installed(settings) then
                     return build_installer_pipeline(settings)
@@ -593,6 +632,7 @@ return function()
             end,
 
             get_layout = function(variant: Variant)
+                __settings = nil  -- force fresh proton scan each time settings are opened
                 local settings = import_settings()
                 return settings.get_layout(variant)
             end
@@ -600,12 +640,13 @@ return function()
 
         tools = {
             get_buttons = function(variant: Variant)
-                if not is_umu_installed() or not is_proton_installed() then
+                local settings    = import_settings()
+
+                if not is_umu_installed() or not is_proton_installed(settings) then
                     return {}
                 end
 
-                local settings    = import_settings()
-                local proton_path = path.join(proton_dir_path, PROTON_ARCHIVE_NAME)
+                local proton_path = path.join(proton_dir_path, get_proton_name(settings))
                 local prefix_path = get_prefix_path(settings)
 
                 local wine_env = {
@@ -636,7 +677,7 @@ return function()
                         title       = "Kill Wineserver",
                         description = "Send wineserver -k to immediately stop all Wine processes in the prefix",
                         callback    = function()
-                            local wineserver_path = path.join(proton_dir_path, PROTON_ARCHIVE_NAME, "files", "bin", "wineserver")
+                            local wineserver_path = path.join(proton_dir_path, get_proton_name(settings), "files", "bin", "wineserver")
                             process.wait(process.open(wineserver_path, { "-k" }, {
                                 WINEPREFIX = path.join(prefix_path, "pfx")
                             }))
