@@ -429,10 +429,11 @@ local function build_installer_pipeline(settings)
 
                     local proton_path = path.join(proton_dir_path, get_proton_name(settings))
                     local wine_env = {
-                        PROTONPATH = proton_path,
-                        WINEPREFIX = path.join(prefix_path, "pfx"),
-                        GAMEID     = get_gameid(settings),
-                        WINEDEBUG  = ""
+                        PROTONPATH        = proton_path,
+                        WINEPREFIX        = path.join(prefix_path, "pfx"),
+                        GAMEID            = get_gameid(settings),
+                        WINEDEBUG         = "",
+                        PROTON_USE_WOW64  = "1"
                     }
 
                     installer_info_cache.wine_env  = wine_env
@@ -567,7 +568,8 @@ return function()
                         PROTONPATH          = proton_path,
                         WINEPREFIX          = path.join(prefix_path, "pfx"),
                         GAMEID              = get_gameid(settings),
-                        WINEDEBUG           = ""
+                        WINEDEBUG           = "",
+                        PROTON_USE_WOW64    = "1"
                     }
                 }
 
@@ -653,7 +655,8 @@ return function()
                     PROTONPATH          = proton_path,
                     WINEPREFIX          = path.join(prefix_path, "pfx"),
                     GAMEID              = get_gameid(settings),
-                    WINEDEBUG           = ""
+                    WINEDEBUG           = "",
+                    PROTON_USE_WOW64    = "1"
                 }
 
                 return {
